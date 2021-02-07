@@ -1,0 +1,360 @@
+---
+title: "KBO_OPS_predict(Dacon)"
+author : SHIRONMARO
+date : '2019-03-28'
+output: html_document
+---
+
+# Predict KBO batter's OPS (2019)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## import Library
+
+```{r, import library,warning=FALSE}
+library(dplyr)
+library(rvest)
+library(stringi)
+library(randomForest)
+library(ggplot2)
+```
+
+## import raw data
+
+```{r, import raw data}
+regular<-read.csv('../data/Regular_Season_Batter.csv', fileEncoding = 'UTF-8', stringsAsFactors = F)
+regular_day<- read.csv('../data/Regular_Season_Batter_Day_by_Day.csv', fileEncoding = 'UTF-8', stringsAsFactors = F)
+pre<- read.csv("../data/Pre_Season_Batter.csv",fileEncoding = 'UTF-8',stringsAsFactors = F)
+submission<-read.csv('../data/submission.csv', fileEncoding = 'UTF-8', stringsAsFactors = F)
+```
+
+
+## make salary data
+
+연봉 데이터를 전처리하여 기존 raw_data에 붙여주기
+
+```{r, make salary data}
+# salary data는 크롤링을 활용하여 가져온 외부 데이터이지만
+# 너무 오래 지나서 크롤링 코드가 존재하지 않는다
+df_salary<-read.csv("../data/salary.csv",header = T)
+df_salary<-left_join(df_salary,regular,by=c("batter_name",'year')) %>% 
+  select(batter_id,batter_name,year,salary)
+df_salary<-unique(df_salary)
+```
+
+
+## Preprocess feature
+
+변수들 중 숫자로 처리해주기 위하여 전처리
+
+```{r, preprocess feature}
+## heigh.weight 변수 처리
+## height변수 cm 짜르기
+regular<-regular%>%
+  mutate(height=substr(regular$height.weight,1,3)) %>% 
+  mutate(height = as.numeric(gsub("[cm]","",height)))
+## weight변수 kg 짜르기
+regular<-regular%>%
+  mutate(weight=substr(regular$height.weight,7,10)) %>% 
+  mutate(weight = as.numeric(gsub("[kg]","",weight)))
+## delete height.weight 쓸모없는 변수 삭제
+regular<-regular%>%
+  select(-height.weight)
+```
+
+## make new feature(Feature Engineering)
+
+기존 변수를 활용하여 새로운 feature를 생성
+
+
+```{r, makenew feature}
+## make new feature
+## career / g_age
+## career : 경력 / g_age : 경기 당시 나이
+regular <- regular %>%
+  mutate(career = 2019 - regular$year + 1) %>% 
+  mutate(g_age = year - as.numeric(substr(regular$year_born, 1,4)) + 1)
+
+## 좌타 / 우타
+po<-vector()
+for(i in 1:nrow(regular)){
+  po[i]<-strsplit(strsplit(regular$position,split="(",fixed = T)[[i]][2],")",fixed = T)
+}
+for(i in 1:nrow(regular)){
+  po[i]<-substr(po[[i]],3,4)
+}
+# righthanded : 우타(1) / 좌타(0) 
+regular$righthanded<-ifelse(po=="우타",1,0)
+
+## transferred : 이적여부확인
+regular$transferred[1]<-0
+for(i in 2:length(regular$team)){
+  if(regular$batter_id[i]==regular$batter_id[i-1] & regular$team[i]!=regular$team[i-1]){
+    regular$transferred[i]<-1
+  }
+  else{
+    regular$transferred[i]<-0
+  }
+}
+
+## regular에 있는 쓸모없는 정보 삭제
+regular2<-regular %>% 
+  select(batter_id,batter_name,year,career,OPS,height,weight,g_age,righthanded,transferred)
+```
+
+## 구장정보 데이터 입히기
+
+구장에 따라 OPS에 영향을 미칠 것이라 생각하여 구장에 따라 변수 생성
+
+for문을 활용하여 새로운 데이터를 만들었지만 코드는 사라짐
+
+```{r, 구장정보}
+## 구장정보 for문 돌리고 난 후에 데이터 전처리
+dat<-read.csv("../data/dt.csv",header=T,fileEncoding = 'UTF8',stringsAsFactors=F)
+dat<-dat %>% 
+  group_by(batter_id) %>% 
+  select(batter_id,batter_name,year_date,team,stadium) %>% 
+  arrange(batter_id) %>% 
+  mutate(year=substr(year_date,1,4)) %>% 
+  filter(!stadium==1&!stadium=="제주")
+
+## 구장정보 한글 영어로 바꾸기
+## s1 : 키움, s2 : KIA, s3 : 삼성, s4 : 한화, s5 : NC, s6 : SK, s7 : 롯데, s8 : 두산,LG, s9 : KT
+dat$s1<-ifelse(dat$stadium %in% c("고척돔","목동"),1,0)
+dat$s2<-ifelse(dat$stadium %in% c("광주","군산","챔피언스필드"),1,0)
+dat$s3<-ifelse(dat$stadium %in% c("대구","대구시민","라이온즈파크","포항"),1,0)
+dat$s4<-ifelse(dat$stadium %in% c("대전","대전한밭","청주"),1,0)
+dat$s5<-ifelse(dat$stadium =="마산",1,0)
+dat$s6<-ifelse(dat$stadium %in% c("문학","인천","인천문학"),1,0)
+dat$s7<-ifelse(dat$stadium %in% c("부산사직","사직","울산"),1,0)
+dat$s8<-ifelse(dat$stadium %in% c("서울","잠실"),1,0)
+dat$s9<-ifelse(dat$stadium %in% c("수원","케이티위즈파크"),1,0)
+
+## dat에서 구장별로 합산 결과 구하기
+dat_sum<-dat %>% 
+  group_by(batter_id,batter_name,year) %>% 
+  select(-stadium) %>% 
+  summarise(s.s1=sum(s1),s.s2=sum(s2),s.s3=sum(s3),s.s4=sum(s4),s.s5=sum(s5),s.s6=sum(s6),s.s7=sum(s7),s.s8=sum(s8),s.s9=sum(s9))
+## year(character) -> year(integer)
+## year 변수가 charater -> 정수형
+dat_sum$year<-as.integer(dat_sum$year)
+
+## regular에 있는 유의미한 정보를 dat_sum에 합친다.
+dat_sum<-left_join(dat_sum,regular2,by=c('batter_id','batter_name','year'))
+dat_sum<-left_join(dat_sum,df_salary,by=c("batter_id","batter_name","year"))
+
+dat_sum<-dat_sum[!is.na(dat_sum$salary)&!is.na(dat_sum$OPS),]
+## ops_n-1이 현재 ops에 가장 큰 영향을 미친다고 생각
+dat_sum$OPS_p<-NA
+for (i in 2:length(dat_sum$batter_id)){
+  dat_sum$OPS_p[1]<-NA
+  if(dat_sum$batter_id[i]==dat_sum$batter_id[i-1]){
+    if(dat_sum$year[i]-1==dat_sum$year[i-1]){
+      dat_sum$OPS_p[i]<-dat_sum$OPS[i-1]
+    }
+  }
+}
+## ops_n-1이기 때문에 연속되지 않으면 확인 불가
+dat_sum_nn<-dat_sum %>% 
+  filter(!is.na(OPS_p))
+dat_sum_nn<-na.omit(dat_sum_nn)
+
+## df_test <- df_test %>% filter(yn_1!=0&yn!=0)
+## data copy
+train_dat<-dat_sum_nn
+```
+
+
+# Modeling
+
+* 선형회귀모형(lm)
+* 일반화선형회귀모형(glm)
+* 랜덤포레스트(randomforest)
+```{r, modeling}
+# 선형회귀모형
+# 변수선택법의 
+
+lm_mod1_n<-lm(OPS~.,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)))
+summary(lm_mod1_n) ## 0.39
+lm_mod0_n<-lm(OPS~1,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)))
+lm_mod2_n<-step(lm_mod1_n,direction = "backward",scope = list(lower=lm_mod0_n))
+summary(lm_mod2_n) ## 0.3939
+## BE 선택법 OPS ~ s.s1 + s.s2 + s.s3 + s.s4 + s.s5 + s.s6 + 
+## s.s7 + s.s8 + s.s9 + weight + salary + OPS_p
+lm_mod3_n<-step(lm_mod0_n,direction = "forward",scope = list(lower=lm_mod0_n,upper=lm_mod1_n))
+summary(lm_mod3_n) ## 0.3939
+## FS 선택법 OPS ~ salary + s.s8 + weight + OPS_p + s.s6 + s.s3 + 
+## s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7
+lm_mod4_n<-step(lm_mod0_n,direction = "both",scope = list(lower=lm_mod0_n,upper=lm_mod1_n))
+summary(lm_mod4_n) ## 0.3939
+#plot(lm_mod4_n$residuals,main="dat_sum_nn's residuals of linear model") ## residual-plot not problem
+## 잔차 이상 X
+## SS 선택법 OPS ~ salary + s.s8 + weight + OPS_p + s.s6 + s.s3 + 
+##s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7
+#hist(dat_sum_nn$OPS[!dat_sum_nn$OPS==0]) ## gausian distribution
+glm_mod1_n<-glm(OPS~.,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),family=gaussian)
+summary(glm_mod1_n) ## AIC : -579.87
+glm_mod0_n<-glm(OPS~1,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),family=gaussian)
+glm_mod2_n<-step(glm_mod1_n,direction = "backward",scope = list(lower=glm_mod0_n))
+summary(glm_mod2_n) ## AIC : -594.62
+## OPS ~ s.s1 + s.s2 + s.s3 + s.s4 + s.s5 + s.s6 + 
+## s.s7 + s.s8 + s.s9 + weight + salary + OPS_p
+glm_mod3_n<-step(glm_mod0_n,direction = "forward",scope = list(upper=glm_mod1_n))
+summary(glm_mod3_n) ## AIC : -595.62
+## OPS ~ salary + s.s8 + weight + OPS_p + s.s6 + s.s3 + 
+## s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7
+glm_mod4_n<-step(glm_mod0_n,direction = "both",scope = list(lower=glm_mod0_n,upper=glm_mod1_n))
+summary(glm_mod4_n) ## AIC : -584.62
+#plot(glm_mod4_n$residuals,main="dat_sum_nn's residuals of Generalized linear model") ## residual-plot not problem
+## OPS ~ salary + s.s8 + weight + OPS_p + s.s6 + s.s3 + 
+## s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7
+## ntree(나무 개수) / mtry(변수 개수) 1 : 500/5 2 : 300/17 3: 1000,17 4 : 2000,17
+r_model1<-randomForest(OPS~.,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),ntree=500,mtry=6,importance=T) ## MSE 0.01915, var explain 36.78
+#r_model2<-randomForest(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=dat_sum_nn,ntree=300,na.action=na.omit)  ## MSE 0.0207, var explain 33.71
+#r_model3<-randomForest(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=dat_sum_nn,ntree=1000,mtry=17,na.action=na.omit) ## MSE 0.0205, var explain 34.27
+#r_model4<-randomForest(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=dat_sum_nn,ntree=2000,mtry=17,na.action=na.omit) ## MSE 0.0205, var explain 34.43
+r_model1
+#par(mfrow=c(2,2))
+#plot(r_model1,main = "500/5")
+#plot(r_model2,main = "300/17")
+#plot(r_model3,main = "1000/17")
+#plot(r_model4,main = "2000/17")
+which.min(r_model1$mse) ## 418
+#which.min(r_model2$mse) ## 171
+#which.min(r_model3$mse) ## 936
+#which.min(r_model4$mse) ## 1344
+r_model1.1<-randomForest(OPS~.,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),ntree=359,mtry=6,importance=T) ## MSE 0.01884, var explain 37.83
+r_model1.1
+## 위 lm을 사용해서 나온 모델
+rlm_model1<-randomForest(OPS~salary + OPS_p + s.s8 + weight + s.s6 + s.s3 + s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7 + career,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),mtry=4,importance=T) ## MSE 0.01897, var explain 37.42
+which.min(rlm_model1$mse)## 90이 최소 트리개수 늘려보자
+rlm_model1.1<-randomForest(OPS~salary + OPS_p + s.s8 + weight + s.s6 + s.s3 + s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7 + career,data=train_dat %>% as.data.frame()%>% select(-c(batter_id,batter_name,year)),ntree=which.min(rlm_model1$mse),mtry=4,importance=T) ## MSE 0.01967, var explain 35.17
+```
+# check test data
+
+이때는 하이퍼 파라미터의 개념이 없어서 정리하지 못함
+
+```{r,test data}
+#MSE<-function(pred,real){
+#  mean((real-pred)^2)
+#}
+#min.c <- data.frame(lm=NA, glm=NA, rf=NA, rlm=NA)
+## data를 7:3으로 train data와 test data로 나누어서 100번실행
+## 예측값과 실제 값의 차이가 적은 모델을 사요
+#for(i in 1:100){
+#  set.seed(i)
+#  sampleindex_i<<-sample(x=1:nrow(dat_sum_nn),size=nrow(dat_sum_nn)*0.7)
+#  train_dat_i<<-dat_sum_nn[sampleindex_i,]
+#  test_dat_i<<-dat_sum_nn[-sampleindex_i,]
+#  lm_mod1_n_i<<-lm(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=train_dat_i)
+#  lm_mod0_n_i<<-lm(OPS~1,data=train_dat_i)
+#  lm_mod4_n_i<<-step(lm_mod0_n_i,direction = "both",scope = list(lower=lm_mod0_n_i,upper=lm_mod1_n_i))
+#  glm_mod1_n_i<<-glm(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=train_dat_i,family=gaussian)
+#  glm_mod0_n_i<<-glm(OPS~1,data=train_dat_i,family=gaussian)
+#  glm_mod4_n_i<<-step(glm_mod0_n_i,direction = "both",scope = list(lower=glm_mod0_n_i,upper=glm_mod1_n_i))
+#  r_model1_i<<-randomForest(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=train_dat_i,ntree=500,mtry=6,importance=T)
+#  r_model1.1_i<<-randomForest(OPS~s.s1+s.s2+s.s3+s.s4+s.s5+s.s6+s.s7+s.s8+s.s9+career+height+weight+g_age+righthanded+transferred+salary+OPS_p,data=train_dat_i,ntree=which.min(r_model1_i$mse),mtry=6,importance=T)
+#  rlm_model1_i<<-randomForest(OPS ~ OPS_p + salary + s.s7 + weight + s.s3 + s.s4 +s.s5 + s.s1 + s.s2 + s.s6 + s.s8,data=train_dat_i,mtry=4,importance=T)
+#  rlm_model1.1_i<<-randomForest(OPS ~ OPS_p + salary + s.s7 + weight + s.s3 + s.s4 +s.s5 + s.s1 + s.s2 + s.s6 + s.s8,data=train_dat_i,ntree=which.min(rlm_model1_i$mse),mtry=4,importance=T)
+#  pred_lm_i<<-predict(lm_mod4_n_i,newdata = test_dat_i,type = "response")
+#  pred_glm_i<<-predict(glm_mod4_n_i,newdata = test_dat_i,type = "response")
+#  pred_r_i<<-predict(r_model1.1_i,newdata = test_dat_i,type = "response")
+#  pred_rlm_i<<-predict(rlm_model1.1_i,newdata = test_dat_i,type="response")
+#  min.c[i,]<-c(MSE(test_dat_i$OPS,pred_lm_i),MSE(test_dat_i$OPS,pred_glm_i),MSE(test_dat_i$OPS,pred_r_i),MSE(test_dat_i$OPS,pred_rlm_i))
+#}
+#min.c
+#colnames(a)
+#for(i in 1:nrow(min.c)){
+#  min.c$final[i] <- min(min.c$lm[i],min.c$glm[i],min.c$rf[i],min.c$rlm[i])
+#  min.c$selection[i] <- ifelse(min.c$final[i]==min.c$lm[i], 1,
+#                               ifelse(min.c$final[i]==min.c$glm[i], 2,
+#                                      ifelse(min.c$final[i]==min.c$rf[i], 3, 4)))
+#}
+#min.c %>% 
+#  group_by(selection) %>% 
+#  summarise(n=n()) ## 10:90
+## rlm_model1.1이 제일 좋다!!
+###########################################################################################################
+###########################################################################################################
+## make submission data 
+
+submission<-read.csv('../data/submission.csv', fileEncoding = 'UTF8', stringsAsFactors = F)
+submission$year<-2018
+submission<- left_join(submission,regular,by=c("batter_id","batter_name","year"))
+submission<-submission %>% 
+  select(batter_id,batter_name,year,team,OPS,weight)
+
+## 19년 이적여부
+## 크롤링 코드가 존재 X
+df_19trans<-read.csv("../data/df_19trans.csv",header=T,stringsAsFactors = F)
+df_19trans$transferred_19 <- ifelse(df_19trans$from_team==df_19trans$to_team, 0, 1)
+submission<-left_join(submission,df_19trans,by="batter_name")
+submission$transferred_19[is.na(submission$transferred_19)]<-0
+submission$team<-ifelse(submission$transferred_19==1,submission$to_team,submission$team)
+submission<-submission %>% 
+  select(batter_id,batter_name,year,team,OPS,weight)
+## career 경력
+regular.min<-regular %>% 
+  group_by(batter_id,batter_name) %>% 
+  summarise(career=2019-min(year)+1)
+submission <-left_join(submission,regular.min,by=c("batter_id","batter_name"))
+submission$team<-ifelse(submission$team=="넥센","키움",submission$team)
+stad<-read.csv("stadium.csv",stringsAsFactors = F)
+stad<-stad %>% rename(s8="잠실",
+                      s5="창원",
+                      s1="고척",
+                      s6="문학",
+                      s2="광주",
+                      s4="대전",
+                      s3="대구",
+                      s7="사직",
+                      s9="수원") %>% 
+  select(-X)
+submission<-left_join(submission,stad,by=c("team"="team"))
+
+submission<-submission %>% 
+  rename(OPS_p=OPS,
+         s.s1=s1,
+         s.s2=s2,
+         s.s3=s3,
+         s.s4=s4,
+         s.s5=s5,
+         s.s6=s6,
+         s.s7=s7,
+         s.s8=s8,
+         s.s9=s9)
+submission$year<-2019
+submission<-left_join(submission,df_salary,by=c("batter_id","batter_name","year"))
+nrow(df_salary[df_salary$year==2019,])
+
+submission$year[is.na(submission$salary)]<-2018
+submission$year[!is.na(submission$salary)]<-2019
+submission<-left_join(submission,df_salary,by=c("batter_id","batter_name","year")) %>% 
+  rename(salary=salary.y)
+submission<-unique(submission)
+table(is.na(submission$OPS_p)) ## 1
+submission$OPS_p[is.na(submission$OPS_p)]<-mean(submission$OPS_p,na.rm=T)
+table(is.na(submission$salary)) ## 4
+submission$salary[is.na(submission$salary)]<-median(submission$salary,na.rm=T)
+pred<-c()
+error.ops<-c();seed <- c()
+for(i in 201:300){
+  set.seed(i)
+  rlm_model1.1<-randomForest(OPS~salary + OPS_p + s.s8 + weight + s.s6 + s.s3 + s.s1 + s.s4 + s.s5 + s.s2 + s.s9 + s.s7 + career,data=train_dat,ntree=which.min(rlm_model1$mse),mtry=4,importance=T) ## MSE 0.01967, var explain 35.17
+  pred<-predict(rlm_model1.1,newdata = submission,type="response")
+  error.ops[i]<-t(pred-real$batter_ops)%*%(pred-real$batter_ops)
+  seed[i] <- i
+  print(i)
+}
+
+a<-pred-real$batter_ops
+t(pred-real$batter_ops)%*%(pred-real$batter_ops)
+pred<-predict(rlm_model1.1,newdata = submission,type="response")
+submission$batter_ops<-pred
+submission<-submission %>% 
+  select(batter_id,batter_name,batter_ops)
+
+write.csv(submission,file="../data/final_submission..csv",fileEncoding = "UTF8",row.names = F)
+```
