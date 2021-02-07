@@ -50,7 +50,7 @@
 
 ## 결과
 
-![최종결과](image/최종 결과.PNG)
+![최종 결과](https://user-images.githubusercontent.com/64209837/107141795-7e3a4880-696e-11eb-94c7-ef1eb47769f3.PNG)
 
 최종 4등으로서 수상을 하지 못하였지만, 이어지는 KBO 타자 OPS 시각화 대회 참가 혜택 받음.
 
