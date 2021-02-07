@@ -2,7 +2,7 @@
 
 해당 공간은 [DACON 타자 OPS 예측 대회](https://dacon.io/competitions/official/62540/overview/)에 참여한 코드를 저장하기 위한 공간입니다.
 
-해당 코드에 대한 저작권은 시로앤마로(안지민, 이인섭, 이형선, 주은혁)에게 있습니다.
+해당 코드에 대한 저작권은 시로앤마로(안지민, [이인섭](https://github.com/insub789), [이형선](https://github.com/traceofpassion), [주은혁](https://github.com/EunHyeok-Ju))에게 있습니다.
 
 주관 : [데이콘](https://dacon.io) / 주최 : KBO
 
